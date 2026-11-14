@@ -1,72 +1,59 @@
-import io
 import re
 import requests
-import pandas as pd
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 
-# Words and indicator acronyms to ignore in forwarded screener alerts
-STOPWORDS = {
-    "ANALYZE", "CHECK", "SWING", "BUY", "SELL", "STOCK", "STOCKS", "START",
-    "HELP", "ALERT", "CMP", "TGT", "TARGET", "STOP", "LOSS", "NSE", "BSE",
-    "PRICE", "HIGH", "LOW", "DATE", "TIME", "IST", "INR", "VOLUME", "VOL",
-    "RSI", "EMA", "SMA", "ATR", "ROC", "NIFTY", "RADAR", "SCORE", "FAILED",
-    "FILTER", "FILTERS", "NONE", "ALL", "PASSED", "ENTRY", "EXIT", "HORIZON",
-    "WEEK", "WEEKS", "DAY", "DAYS", "TOP", "LIST", "SCAN", "SCANNER", "JAN",
-    "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"
-}
 
-def _get_valid_nse_symbols() -> set:
-    """Fetches active NSE equity symbols to filter out any non-stock words."""
-    url = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        resp = requests.get(url, headers=headers, timeout=10)
-        if resp.status_code == 200:
-            df = pd.read_csv(io.StringIO(resp.text))
-            return set(df[df["SERIES"] == "EQ"]["SYMBOL"].dropna().str.strip().tolist())
-    except Exception:
-        pass
-    return set()
-
-def extract_tickers_from_forwarded_msg(raw_text: str) -> list:
+def extract_numbered_tickers(raw_text: str) -> list:
     """
-    Extracts up to 5 stock tickers from a rich forwarded Telegram message
-    containing CMP, scores, and failed filter descriptions.
+    Strictly extracts stock tickers placed immediately after list numbers
+    (e.g., '1. SAILIFE', '5.PNB', '2) EMCURE') and ignores all metrics,
+    headers, and failed-filter descriptions.
     """
-    # Strip any HTML/Markdown formatting symbols while preserving case
+    # Strip any HTML/Markdown formatting tags while preserving line breaks and case
     cleaned = re.sub(r"<[^>]+>", " ", raw_text)
-    cleaned = cleaned.replace(".NS", "").replace(".BO", "").replace("*", "").replace("`", "")
-
-    # Layer 1: Look for numbered/ranked stock entries (e.g., "1. PFOCUS", "2) PAYTM")
-    # Matching on case-preserved text ignores Title-Case words like "Score" or "Failed"
-    ranked_matches = re.findall(
-        r"(?:^|\n)\s*[\•\-]?\s*\d+[\.\)\:]\s*([A-Z][A-Z0-9&-]{1,14})\b",
-        cleaned
+    cleaned = (
+        cleaned.replace(".NS", "")
+        .replace(".BO", "")
+        .replace("*", "")
+        .replace("`", "")
     )
 
-    candidates = ranked_matches if ranked_matches else re.findall(r"\b[A-Z][A-Z0-9&-]{1,14}\b", cleaned)
+    # Match 1- or 2-digit list numbers at the start of a line followed by a ticker
+    # Handles both spaced ("5. PNB") and unspaced ("5.PNB") formats
+    numbered_matches = re.findall(
+        r"(?:^|\n)\s*\d{1,2}\s*[\.\)\:\-]\s*([A-Z][A-Z0-9&-]{1,19})(?=\s|\(|\||\:|\-|,|$)",
+        cleaned,
+    )
 
-    # Deduplicate while preserving order and removing metric acronyms
-    unique_candidates = []
+    # Deduplicate while preserving exact rank order (1 to 5)
     seen = set()
-    for sym in candidates:
-        if sym not in STOPWORDS and sym not in seen:
-            seen.add(sym)
-            unique_candidates.append(sym)
+    tickers = []
+    for symbol in numbered_matches:
+        if symbol not in seen:
+            seen.add(symbol)
+            tickers.append(symbol)
 
-    # Layer 2: Cross-check against official NSE symbols if available
-    valid_nse = _get_valid_nse_symbols()
-    if valid_nse:
-        verified = [s for s in unique_candidates if s in valid_nse]
-        if verified:
-            return verified[:5]
+    if tickers:
+        return tickers[:5]
 
-    return unique_candidates[:5]
+    # Fallback ONLY for short direct commands without numbers (e.g., "/analyze TRENT, BEL")
+    lines = [ln.strip() for ln in cleaned.splitlines() if ln.strip()]
+    if len(lines) <= 2:
+        direct_text = re.sub(r"^/ANALYZE\b", "", cleaned.upper()).strip()
+        direct_matches = re.findall(r"\b[A-Z][A-Z0-9&-]{1,19}\b", direct_text)
+        reserved = {"ANALYZE", "CHECK", "SWING", "BUY", "SELL", "STOCK", "STOCKS", "START", "HELP"}
+        for symbol in direct_matches:
+            if symbol not in reserved and symbol not in seen:
+                seen.add(symbol)
+                tickers.append(symbol)
+
+    return tickers[:5]
+
 
 def fetch_latest_stock_names(default_tickers=None):
     """
-    Polls getUpdates from the Telegram Bot API to extract stock tickers
-    from your latest forwarded or direct message.
+    Polls getUpdates from the Telegram Bot API and extracts the numbered
+    stock list from your latest forwarded radar message.
     """
     if default_tickers is None:
         default_tickers = ["TRENT", "BEL", "HAL", "DIXON", "PERSISTENT"]
@@ -88,15 +75,16 @@ def fetch_latest_stock_names(default_tickers=None):
             if not msg_text:
                 continue
 
-            tickers = extract_tickers_from_forwarded_msg(msg_text)
+            tickers = extract_numbered_tickers(msg_text)
             if tickers:
-                print(f"[TELEGRAM BRIDGE] Extracted {len(tickers)} tickers from forwarded alert: {tickers}")
+                print(f"[TELEGRAM BRIDGE] Extracted {len(tickers)} numbered tickers: {tickers}")
                 return tickers
     except Exception as exc:
         print(f"[TELEGRAM BRIDGE ERROR] {exc}")
 
-    print("[TELEGRAM BRIDGE] No valid tickers found in recent messages. Using fallback list.")
+    print("[TELEGRAM BRIDGE] No numbered stock list found in recent messages. Using fallback list.")
     return default_tickers
+
 
 def send_telegram_html(message: str) -> bool:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -108,11 +96,14 @@ def send_telegram_html(message: str) -> bool:
         "chat_id": TELEGRAM_CHAT_ID,
         "text": message,
         "parse_mode": "HTML",
-        "disable_web_page_preview": True
+        "disable_web_page_preview": True,
     }
     try:
         resp = requests.post(url, json=payload, timeout=12)
-        return resp.status_code == 200
+        if resp.status_code == 200:
+            return True
+        print(f"[TELEGRAM ERROR] HTTP {resp.status_code}: {resp.text}")
+        return False
     except Exception as exc:
         print(f"[TELEGRAM DISPATCH ERROR] {exc}")
         return False
