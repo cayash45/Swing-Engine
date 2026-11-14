@@ -2,9 +2,10 @@ name: Swing Momentum Technical Validator
 
 on:
   schedule:
-    # 10:15 UTC = 3:45 PM IST (Monday to Friday post-market close)
-    - cron: '15 10 * * 1-5'
-  workflow_dispatch: # Allows manual trigger from GitHub Actions dashboard
+    # 22:30 UTC = 04:00 AM IST next morning
+    # '1-5' in UTC runs Mon-Fri night UTC -> Tue-Sat 4:00 AM IST
+    - cron: '30 22 * * 1-5'
+  workflow_dispatch: # Keeps manual trigger available anytime from the Actions tab
 
 jobs:
   run-validator:
