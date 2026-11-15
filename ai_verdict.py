@@ -33,7 +33,7 @@ def generate_reasoning_narrative(metrics: dict) -> str:
                 f"3. Concrete Execution Action Plan (Entry, Invalidation, Target). Keep it concise, professional, and institutional."
             )
             response = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-3.0-flash",
                 contents=prompt
             )
             if response.text:
