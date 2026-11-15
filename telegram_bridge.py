@@ -9,7 +9,6 @@ def extract_numbered_tickers(raw_text: str) -> list:
     (e.g., '1. SAILIFE', '5.PNB', '2) EMCURE') and ignores all metrics,
     headers, and failed-filter descriptions.
     """
-    # Strip any HTML/Markdown formatting tags while preserving line breaks and case
     cleaned = re.sub(r"<[^>]+>", " ", raw_text)
     cleaned = (
         cleaned.replace(".NS", "")
@@ -18,14 +17,11 @@ def extract_numbered_tickers(raw_text: str) -> list:
         .replace("`", "")
     )
 
-    # Match 1- or 2-digit list numbers at the start of a line followed by a ticker
-    # Handles both spaced ("5. PNB") and unspaced ("5.PNB") formats
     numbered_matches = re.findall(
         r"(?:^|\n)\s*\d{1,2}\s*[\.\)\:\-]\s*([A-Z][A-Z0-9&-]{1,19})(?=\s|\(|\||\:|\-|,|$)",
         cleaned,
     )
 
-    # Deduplicate while preserving exact rank order (1 to 5)
     seen = set()
     tickers = []
     for symbol in numbered_matches:
@@ -55,35 +51,57 @@ def fetch_latest_stock_names(default_tickers=None):
     Polls getUpdates from the Telegram Bot API and extracts the numbered
     stock list from your latest forwarded radar message.
     """
-    if default_tickers is None:
-        default_tickers = ["TRENT", "BEL", "HAL", "DIXON", "PERSISTENT"]
-
     if not TELEGRAM_BOT_TOKEN:
-        print("[WARN] No Telegram Bot Token configured. Using fallback tickers.")
-        return default_tickers
+        print("[WARN] No Telegram Bot Token configured.")
+        return default_tickers or []
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+    raw_status = "unknown"
+
     try:
         res = requests.get(url, params={"offset": -10, "limit": 10}, timeout=10)
         data = res.json()
-        if not data.get("ok") or not data.get("result"):
-            return default_tickers
+        ok = data.get("ok")
+        results = data.get("result") or []
+        desc = data.get("description")
+        raw_status = f"ok={ok}, count={len(results)}, desc={desc}"
+        print(f"[TELEGRAM RAW] {raw_status}")
 
-        for update in reversed(data["result"]):
-            msg_obj = update.get("message") or update.get("channel_post") or {}
-            msg_text = msg_obj.get("text") or msg_obj.get("caption") or ""
-            if not msg_text:
-                continue
+        if ok and results:
+            for update in reversed(results):
+                msg_obj = (
+                    update.get("message")
+                    or update.get("channel_post")
+                    or update.get("edited_message")
+                    or update.get("edited_channel_post")
+                    or {}
+                )
+                msg_text = msg_obj.get("text") or msg_obj.get("caption") or ""
+                if not msg_text:
+                    continue
 
-            tickers = extract_numbered_tickers(msg_text)
-            if tickers:
-                print(f"[TELEGRAM BRIDGE] Extracted {len(tickers)} numbered tickers: {tickers}")
-                return tickers
+                tickers = extract_numbered_tickers(msg_text)
+                if tickers:
+                    print(f"[TELEGRAM BRIDGE] Extracted {len(tickers)} numbered tickers: {tickers}")
+                    return tickers
+
+            print("[TELEGRAM BRIDGE] Messages found, but none contained a numbered stock list.")
+        else:
+            print("[TELEGRAM BRIDGE] Telegram returned no usable updates.")
     except Exception as exc:
+        raw_status = f"error={exc}"
         print(f"[TELEGRAM BRIDGE ERROR] {exc}")
 
-    print("[TELEGRAM BRIDGE] No numbered stock list found in recent messages. Using fallback list.")
-    return default_tickers
+    if default_tickers:
+        print(f"[TELEGRAM BRIDGE] Using provided fallback list: {default_tickers}")
+        return default_tickers
+
+    send_telegram_html(
+        f"⚠️ <b>Swing-Engine:</b> No forwarded stock list found in Telegram "
+        f"(<code>{raw_status}</code>).\n"
+        f"Forward your Top 5 list directly to this bot in a 1-on-1 chat and re-run."
+    )
+    return []
 
 
 def send_telegram_html(message: str) -> bool:
@@ -107,3 +125,4 @@ def send_telegram_html(message: str) -> bool:
     except Exception as exc:
         print(f"[TELEGRAM DISPATCH ERROR] {exc}")
         return False
+    
